@@ -3,7 +3,7 @@
 a linux kernel model use to create a linux device which you can read or write.
 
 ### ProjectRecord
-- **[项目记录]**(https://github.com/NaokiLH/linux_model/blob/master/项目记录.md)
+[项目记录](https://github.com/NaokiLH/linux_model/blob/master/项目记录.md)
 ### Build
 
 ```sh
