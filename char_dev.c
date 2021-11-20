@@ -3,207 +3,201 @@
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/slab.h>
+#include <linux/spinlock.h>
 #include <linux/string.h>
 #include <linux/uaccess.h>
 
 #define DEV_MAJOR 0
 #define DEV_MINOR 0
-#define DEV_NR_DEVS 1 //设备数量
+#define DEV_NR_DEVS 1 //device number
 
-int char_major = DEV_MAJOR;
-int char_minor = DEV_MINOR;
+int pipe_major = DEV_MAJOR;
+int pipe_minor = DEV_MINOR;
 
 dev_t devt;
 
-//注册为参数
-module_param(char_major, int, S_IRUGO);
-module_param(char_minor, int, S_IRUGO);
+//register device
+module_param(pipe_major, int, S_IRUGO);
+module_param(pipe_minor, int, S_IRUGO);
 
-//定义设备结构体
-struct char_dev
+//device struct
+struct pipe_dev
 {
     struct cdev cdev;
-    char *c;
-    int n;
-    struct mutex mtx;
+    char *data;
+    int n;    //data length
+    int size; //memory size
+    struct spinlock lock;
 };
 
-struct char_dev *char_devp; //定义设备结构体指针
-struct class *char_cls;     //定义一个类
+struct pipe_dev *pipe_devp; //device struct pointer
+struct class *pipe_class;   //class
 
-//open方法
-int char_open(struct inode *inode, struct file *filp)
+//open
+int pipe_open(struct inode *inode, struct file *filp)
 {
-    struct char_dev *dev;
-    dev = container_of(inode->i_cdev, struct char_dev, cdev);
+    struct pipe_dev *dev;
+    printk(KERN_INFO "***********************pipe_open**********************\n");
+    dev = container_of(inode->i_cdev, struct pipe_dev, cdev);
     filp->private_data = dev;
+    filp->f_pos = 0; //set file position to 0
     return 0;
 }
-//read方法
-ssize_t char_read(struct file *filp, char __user *buf, size_t size, loff_t *ppos)
+//read
+ssize_t pipe_read(struct file *filp, char __user *buf, size_t count, loff_t *ppos)
 {
-    int ret = 0;
-    struct char_dev *dev = filp->private_data;
-    if (mutex_lock_interruptible(&dev->mtx)) {
-        return -ERESTARTSYS;
-    }
-    printk("get mutex\n");
-    printk("dev->n : %d ,file_pos : %lld\n", dev->n, filp->f_pos);
-
-    if (*ppos >= dev->n) //判断读取的位置是否超出范围
-    {
-        mutex_unlock(&dev->mtx);
-        return 0;
-    }
-    if (*ppos + size > dev->n) //判断读取的长度是否超出范围
-        size = dev->n - *ppos;
-    if (copy_to_user(buf, dev->c, size)) {
-        mutex_unlock(&dev->mtx);
-        ret = -EFAULT;
-    } else {
-        *ppos += size;
-        ret = size;
-    }
-    mutex_unlock(&dev->mtx);
-    printk("release mutex\n");
-    return ret;
-}
-//write方法
-ssize_t char_write(struct file *filp, const char __user *buf, size_t size, loff_t *ppos)
-{
-    int ret = 0;
-    char *new_devc = NULL;
-    struct char_dev *dev = filp->private_data;
-    if (mutex_lock_interruptible(&dev->mtx)) {
-        return -ERESTARTSYS;
-    }
-    printk("get mutex\n");
-    if (filp->f_flags & O_APPEND) {
-        *ppos = dev->n;
-        printk("read O_APPEND\n");
-    }
-    printk("write start at %lld in address %p\n", *ppos, dev->c);
-    if (*ppos + size > dev->n) //判断写入的长度是否超出范围
-    {
-        new_devc = krealloc(dev->c, *ppos + size, GFP_KERNEL);
-        if (!new_devc) {
-            mutex_unlock(&dev->mtx);
-            return -ENOMEM;
+    ssize_t ret = 0;
+    printk(KERN_INFO "-----------------------pipe_read----------------------\n");
+    struct pipe_dev *dev = filp->private_data;
+    unsigned long flags;
+    spin_lock_irqsave(&dev->lock, flags);
+    printk("get spinlock\n");
+    if (dev->n > 0) {
+        if (*ppos + count > dev->n) // if read size is bigger than data length
+        {
+            count = dev->n;
         }
-        dev->c = new_devc;
-    }
-    if (copy_from_user(dev->c + *ppos, buf, size)) {
-        mutex_unlock(&dev->mtx);
-        ret = -EFAULT;
-    } else {
-        dev->n = *ppos + size;
-        *ppos += size;
-        printk("write end at %lld\n", *ppos);
-        printk("n:%d\n", dev->n);
-        ret = size;
-    }
-    mutex_unlock(&dev->mtx);
-    printk("release mutex\n");
+        printk("read count : %ld,length : %d,size : %d\n", count, dev->n, dev->size);
+        if (copy_to_user(buf, dev->data, count)) {
+            spin_unlock_irqrestore(&dev->lock, flags);
+            printk(KERN_ERR "copy_to_user error\n");
+            ret = -EFAULT;
+        } else {
+            ret = count;
+            dev->n -= count;
+            memmove(dev->data, dev->data + count, dev->n);
+        }
+    } else
+        printk("read count : %ld,length : %d,size : %d\n", count, dev->n, dev->size);
+    spin_unlock_irqrestore(&dev->lock, flags);
+    printk("release spinlock\n");
     return ret;
 }
-loff_t char_llseek(struct file *filp, loff_t offset, int whence)
+//write
+ssize_t pipe_write(struct file *filp, const char __user *buf, size_t count, loff_t *ppos)
 {
-    loff_t newpos;
-    struct char_dev *dev = filp->private_data;
-    printk("llseek");
-    switch (whence) {
-        case 0: /* SEEK_SET */
-            newpos = offset;
-            break;
-        case 1: /* SEEK_CUR */
-            newpos = filp->f_pos + offset;
-            break;
-        case 2: /* SEEK_END */
-            newpos = dev->n + offset;
-            break;
-        default: /* can't happen */
-            return -EINVAL;
+    ssize_t ret = 0;
+    printk(KERN_INFO "-----------------------pipe_write----------------------\n");
+    struct pipe_dev *dev = filp->private_data;
+    unsigned long flags;
+    char *tmp;
+    spin_lock_irqsave(&dev->lock, flags);
+    printk("get spinlock\n");
+    if (count + dev->n > dev->size) {
+        tmp = krealloc(dev->data, count + dev->n, GFP_KERNEL);
+        if (!tmp) {
+            printk(KERN_ERR "krealloc failed\n");
+            ret = -ENOMEM;
+            goto fail_write;
+        }
+        dev->data = tmp;
+        dev->size = count + dev->n;
+        printk("after realloc the size is %d\n", dev->size);
     }
-    if (newpos < 0)
-        return -EINVAL;
-    filp->f_pos = newpos;
-    return newpos;
+    if (copy_from_user(dev->data + dev->n, buf, count)) {
+        printk(KERN_ERR "copy_from_user failed\n");
+        ret = -EFAULT;
+        goto fail_write;
+    }
+    ret = count;
+    dev->n += count;
+    spin_unlock_irqrestore(&dev->lock, flags);
+    printk("release spinlock\n");
+    return ret;
+fail_write:
+    spin_unlock_irqrestore(&dev->lock, flags);
+    printk("release spinlock\n");
+    return ret;
 }
-int char_release(struct inode *inode, struct file *filp)
+//release
+int pipe_release(struct inode *inode, struct file *filp)
 {
-    printk("release\n");
+    printk(KERN_INFO "***********************pipe_close*********************\n");
     return 0;
 }
-
-//定义文件操作结构体
-struct file_operations char_fops = {
+//file operations
+struct file_operations pipe_fops = {
     .owner = THIS_MODULE,
-    .open = char_open,
-    .read = char_read,
-    .write = char_write,
-    .release = char_release,
-    .llseek = char_llseek,
+    .open = pipe_open,
+    .read = pipe_read,
+    .write = pipe_write,
+    .release = pipe_release,
 };
 
-static int char_init(void)
+//init
+static int __init pipe_init(void)
 {
     int ret = 0;
-    printk("char_dev_init\n");
-    if (char_major) {
-        devt = MKDEV(char_major, char_minor);                        //获取设备号
-        ret = register_chrdev_region(devt, DEV_NR_DEVS, "char_dev"); //给定参数注册设备号
-    } else
-        ret = alloc_chrdev_region(&devt, char_minor, DEV_NR_DEVS, "char_dev"); //动态分配设备号
-    if (ret < 0)                                                               //分配失败
-    {
-        printk(KERN_ERR "register_chrdev_region failed\n");
+    printk(KERN_INFO "-----------------------pipe_init----------------------\n");
+    devt = MKDEV(pipe_major, pipe_minor);
+    if (pipe_major) {
+        ret = register_chrdev_region(devt, DEV_NR_DEVS, "pipe_dev");
+    } else {
+        ret = alloc_chrdev_region(&devt, pipe_minor, DEV_NR_DEVS, "pipe_dev");
+        pipe_major = MAJOR(devt);
+    }
+    if (ret < 0) {
+        printk(KERN_ERR "register char device error\n");
         return ret;
     }
-    char_devp = kmalloc(sizeof(struct char_dev), GFP_KERNEL); //分配内存
-    if (!char_devp) {
-        ret = -ENOMEM;
+    //init device struct
+    pipe_devp = kmalloc(sizeof(struct pipe_dev), GFP_KERNEL);
+    if (!pipe_devp) {
+        printk(KERN_ERR "kmalloc error\n");
         goto fail_malloc;
     }
-    memset(char_devp, 0, sizeof(struct char_dev));       //初始化内存
-    cdev_init(&char_devp->cdev, &char_fops);             //初始化cdev结构体
-    char_devp->cdev.owner = THIS_MODULE;                 //设置所有者
-    mutex_init(&char_devp->mtx);                         //初始化互斥锁
-    ret = cdev_add(&char_devp->cdev, devt, DEV_NR_DEVS); //添加设备
+    //init memory
+    memset(pipe_devp, 0, sizeof(struct pipe_dev));
+    //init cdev
+    cdev_init(&pipe_devp->cdev, &pipe_fops);
+    pipe_devp->cdev.owner = THIS_MODULE;
+    //init spinlock
+    spin_lock_init(&pipe_devp->lock);
+    //add cdev
+    ret = cdev_add(&pipe_devp->cdev, devt, DEV_NR_DEVS);
     if (ret) {
-        printk(KERN_ERR "cdev_add failed\n");
-        goto fail_add;
+        printk(KERN_ERR "cdev_add error\n");
+        goto fail_cdev_add;
     }
-    char_cls = class_create(THIS_MODULE, "char_dev"); //创建类
-    if (IS_ERR(char_cls)) {
-        printk(KERN_ERR "class_create failed\n");
-        goto fail_class;
+    //create class
+    pipe_class = class_create(THIS_MODULE, "pipe_class");
+    if (IS_ERR(pipe_class)) {
+        printk(KERN_ERR "class_create error\n");
+        goto fail_class_create;
     }
-    device_create(char_cls, NULL, devt, NULL, "char_dev"); //创建设备
+    //create device
+    device_create(
+        pipe_class,
+        NULL,
+        devt,
+        NULL,
+        "pipe_dev");
     return 0;
 
-fail_class:
-    cdev_del(&char_devp->cdev);
-fail_add:
-    kfree(char_devp);
+fail_class_create:
+    cdev_del(&pipe_devp->cdev);
+fail_cdev_add:
+    kfree(pipe_devp);
 fail_malloc:
     unregister_chrdev_region(devt, DEV_NR_DEVS);
     return ret;
 }
 
-static void char_exit(void)
+//exit
+static void __exit pipe_exit(void)
 {
-    device_destroy(char_cls, devt);
-    class_destroy(char_cls);
-    cdev_del(&char_devp->cdev);
-    kfree(char_devp);
+    device_destroy(pipe_class, devt);
+    class_destroy(pipe_class);
+    cdev_del(&pipe_devp->cdev);
+    kfree(pipe_devp);
     unregister_chrdev_region(devt, DEV_NR_DEVS);
-    printk(KERN_INFO "char_dev_exit\n");
+    printk(KERN_INFO "-----------------------pipe_exit----------------------\n");
 }
 
-module_init(char_init);
-module_exit(char_exit);
+module_init(pipe_init);
+module_exit(pipe_exit);
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("NaokiLH");
-MODULE_DESCRIPTION("char_dev");
+MODULE_DESCRIPTION("PIPE_DEV");
 MODULE_VERSION("V1.0");
