@@ -16,7 +16,7 @@ int pipe_minor = DEV_MINOR;
 
 dev_t devt;
 
-//register device
+//register parameters
 module_param(pipe_major, int, S_IRUGO);
 module_param(pipe_minor, int, S_IRUGO);
 
