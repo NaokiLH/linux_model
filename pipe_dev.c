@@ -50,6 +50,7 @@ ssize_t pipe_read(struct file *filp, char __user *buf, size_t count, loff_t *ppo
     printk(KERN_INFO "-----------------------pipe_read----------------------\n");
     struct pipe_dev *dev = filp->private_data;
     unsigned long flags;
+
     spin_lock_irqsave(&dev->lock, flags);
     printk("get spinlock\n");
     if (dev->n > 0) {
